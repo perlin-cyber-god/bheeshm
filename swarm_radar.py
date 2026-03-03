@@ -1,5 +1,4 @@
 import pygame
-import random
 import socket
 import csv
 import time
@@ -11,100 +10,138 @@ sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind((UDP_IP, UDP_PORT))
 sock.setblocking(False)
 
-# Create/Open CSV file for training data
+# Data Logging
 csv_file = open('swarm_telemetry_data.csv', mode='w', newline='')
 csv_writer = csv.writer(csv_file)
-# Header: ID, X, Y, Battery, Label (0=Normal, 1=Attack)
 csv_writer.writerow(['node_id', 'pos_x', 'pos_y', 'battery', 'label'])
 
-# --- RADAR CONFIG ---
-WIDTH, HEIGHT = 800, 600
+# --- UI CONFIG ---
+WIDTH, HEIGHT = 1000, 750  # Increased resolution for tactical view
 FPS = 30
-NUM_DRONES = 5
-BG_COLOR = (10, 15, 20)
-NODE_COLOR = (0, 255, 0)
-REAL_COLOR = (255, 150, 0)
-MASTER_COLOR = (255, 50, 50)
-LINK_COLOR = (0, 150, 255)
+MASTER_ID = 1 # Initial Master (Raspberry Pi)
+HEARTBEAT_TIMEOUT = 3.0 # Seconds before a drone is considered "Down"
+
+# Colors
+WHITE = (255, 255, 255)
+RED = (255, 50, 50)       # Master
+ORANGE = (255, 165, 0)    # Active Node
+CYAN = (0, 255, 255)      # Sector UI
+GRAY = (100, 100, 100)    # Offline
 
 class Drone:
     def __init__(self, drone_id):
         self.id = drone_id
-        self.x = random.randint(100, WIDTH - 100)
-        self.y = random.randint(100, HEIGHT - 100)
-        self.vx = random.uniform(-0.5, 0.5)
-        self.vy = random.uniform(-0.5, 0.5)
-        self.battery = random.randint(50, 100)
-        self.is_alive = True
-        self.is_master = False
+        self.x, self.y = 0, 0
+        self.battery = 100
         self.is_physical = False
-
-    def move(self):
-        if not self.is_alive or self.is_physical: return
-        self.x += self.vx
-        self.y += self.vy
-        if self.x <= 0 or self.x >= WIDTH: self.vx *= -1
-        if self.y <= 0 or self.y >= HEIGHT: self.vy *= -1
+        self.last_seen = 0
+        self.is_alive = False
+        self.is_master = False
 
 def main():
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    pygame.display.set_caption("BHEESHM: Data Collection Mode")
+    pygame.display.set_caption("BHEESHM: Tactical Swarm Anchor (ZedBoard HIL)")
+    
+    # LOAD ASSETS
+    try:
+        bg = pygame.image.load("basecamp.png")
+        bg = pygame.transform.scale(bg, (WIDTH, HEIGHT))
+    except:
+        print("Error: basecamp.png not found. Using dark background.")
+        bg = None
+
     clock = pygame.time.Clock()
-    font = pygame.font.SysFont("monospace", 15, bold=True)
+    font = pygame.font.SysFont("arial", 18, bold=True)
+    small_font = pygame.font.SysFont("arial", 12)
 
-    swarm = [Drone(i) for i in range(1, NUM_DRONES + 1)]
-    swarm[0].is_master = True
+    # Initialize Swarm (Nodes 1 and 2 are our physical RPi and ESP)
+    swarm = {1: Drone(1), 2: Drone(2)}
+    global MASTER_ID
 
-    print("[SYSTEM] Recording telemetry to swarm_telemetry_data.csv...")
+    print("[SYSTEM] Tactical Overlay Active. Listening for packets...")
 
     running = True
     try:
         while running:
-            screen.fill(BG_COLOR)
+            # 1. DRAW BACKGROUND & SECTORS
+            if bg:
+                screen.blit(bg, (0, 0))
+            else:
+                screen.fill((10, 15, 20))
             
-            # 1. Capture and Log UDP Packets
+            # Draw Sector Divider (Alpha/Bravo)
+            pygame.draw.line(screen, CYAN, (WIDTH//2, 0), (WIDTH//2, HEIGHT), 2)
+            screen.blit(font.render("SECTOR ALPHA", True, CYAN), (50, 20))
+            screen.blit(font.render("SECTOR BRAVO", True, CYAN), (WIDTH//2 + 50, 20))
+
+            # 2. CAPTURE & LOG DATA
+            current_time = time.time()
             try:
                 while True:
                     data, addr = sock.recvfrom(1024)
-                    message = data.decode('utf-8')
-                    parts = message.split(',')
+                    msg = data.decode('utf-8').split(',')
                     
-                    if len(parts) == 4:
-                        d_id = int(parts[0])
-                        d_x = float(parts[1])
-                        d_y = float(parts[2])
-                        d_bat = int(parts[3])
-
-                        # AI TRAINING LOGIC: 
-                        # If coordinates are exactly 50,50, we label it as ATTACK (1)
-                        # In a real scenario, this would be based on "impossible" movement.
+                    if len(msg) == 4:
+                        d_id, d_x, d_y, d_bat = int(msg[0]), float(msg[1]), float(msg[2]), int(msg[3])
+                        
+                        # Labeling for AI Training
                         label = 1 if (d_x == 50.0 and d_y == 50.0) else 0
                         csv_writer.writerow([d_id, d_x, d_y, d_bat, label])
 
-                        for drone in swarm:
-                            if drone.id == d_id:
-                                drone.x, drone.y, drone.battery = d_x, d_y, d_bat
-                                drone.is_physical = True
+                        if d_id in swarm:
+                            drone = swarm[d_id]
+                            drone.x, drone.y = d_x, d_y
+                            drone.battery = d_bat
+                            drone.last_seen = current_time
+                            drone.is_alive = True
             except BlockingIOError:
                 pass
+
+            # 3. SELF-HEALING LOGIC (Master Election)
+            # If current Master is offline, elect the other node
+            if swarm[MASTER_ID].is_alive and (current_time - swarm[MASTER_ID].last_seen > HEARTBEAT_TIMEOUT):
+                print(f"[ALERT] MASTER NODE {MASTER_ID} LOST. ELECTING NEW ANCHOR...")
+                swarm[MASTER_ID].is_alive = False
+                # Simple flip logic for 2-node demo
+                MASTER_ID = 2 if MASTER_ID == 1 else 1 
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT: running = False
 
-            # Draw Logic
-            for drone in swarm:
-                drone.move()
-                color = MASTER_COLOR if drone.is_master else (REAL_COLOR if drone.is_physical else NODE_COLOR)
-                pygame.draw.circle(screen, color, (int(drone.x), int(drone.y)), 10)
-                screen.blit(font.render(f"ID:{drone.id}", True, (255, 255, 255)), (drone.x + 12, drone.y - 12))
+            # 4. DRAW DRONES & TELEMETRY
+            for d_id, drone in swarm.items():
+                if not drone.is_alive: continue
+                
+                # Check for "Death" timeout
+                if current_time - drone.last_seen > HEARTBEAT_TIMEOUT:
+                    drone.is_alive = False
+                    continue
+
+                # Determine Color
+                color = RED if d_id == MASTER_ID else ORANGE
+                
+                # Draw Drone Body
+                pos = (int(drone.x), int(drone.y))
+                pygame.draw.circle(screen, color, pos, 15)
+                pygame.draw.circle(screen, WHITE, pos, 15, 2) # Outline
+
+                # Draw Data Labels
+                role_text = "MASTER (ANCHOR)" if d_id == MASTER_ID else "SCOUT"
+                label = font.render(f"ID:{d_id} | {role_text}", True, WHITE)
+                bat_text = small_font.render(f"BATT: {drone.battery}%", True, WHITE)
+                
+                screen.blit(label, (drone.x + 20, drone.y - 20))
+                screen.blit(bat_text, (drone.x + 20, drone.y))
+
+                # Simulate Video Feed Viewport (Green box around drone)
+                pygame.draw.rect(screen, (0, 255, 0), (drone.x-30, drone.y-30, 60, 60), 1)
 
             pygame.display.flip()
             clock.tick(FPS)
     finally:
         csv_file.close()
         pygame.quit()
-        print("[SYSTEM] Data collection complete. File saved.")
 
 if __name__ == "__main__":
     main()
