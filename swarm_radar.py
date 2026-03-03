@@ -1,154 +1,147 @@
 import pygame
-import socket
-import csv
-import time
 import random
+import time
 
-# --- NETWORK & LOGGING CONFIG ---
-UDP_IP = "0.0.0.0"
-UDP_PORT = 5005
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind((UDP_IP, UDP_PORT))
-sock.setblocking(False)
-
-# Data Logging
-csv_file = open('swarm_telemetry_data.csv', mode='w', newline='')
-csv_writer = csv.writer(csv_file)
-csv_writer.writerow(['node_id', 'pos_x', 'pos_y', 'battery', 'label'])
-
-# --- UI CONFIG ---
-WIDTH, HEIGHT = 1000, 750  
+# --- CONFIG ---
+WIDTH, HEIGHT = 1200, 750 # Extra width for the Sidebar UI
+RADAR_WIDTH = 1000
 FPS = 30
-MASTER_ID = 1 
-HEARTBEAT_TIMEOUT = 3.0 
 
 # Colors
-WHITE = (255, 255, 255)
-RED = (255, 50, 50)       
-ORANGE = (255, 165, 0)    
-CYAN = (0, 255, 255)      
-VIRTUAL_BLUE = (0, 150, 255) # Color for simulated nodes
+BG_DARK = (5, 10, 15)
+UI_PANEL = (20, 30, 40)
+CYAN = (0, 255, 255)
+GREEN = (0, 255, 100)
+RED = (255, 50, 50)
+WHITE = (220, 220, 220)
 
-class Drone:
-    def __init__(self, drone_id, start_x, start_y):
-        self.id = drone_id
+class VirtualDrone:
+    def __init__(self, id, start_x, start_y, color):
+        self.id = id
         self.x, self.y = start_x, start_y
-        self.vx = random.uniform(-1, 1)
-        self.vy = random.uniform(-1, 1)
+        self.color = color
         self.battery = 100
-        self.is_physical = False # Tracks if real hardware is talking
-        self.last_seen = 0
-        self.is_alive = True
-        self.is_master = False
+        self.path = [] # For breadcrumbs/coverage
+        self.target = None # For "Target Pursuit"
+        self.angle = random.uniform(0, 360)
+        self.speed = 2
 
-    def simulate_behavior(self, master_id):
-        """Moves the drone autonomously when no hardware is connected."""
-        # 1. Battery drain simulation
-        if random.random() < 0.01:
-            self.battery = max(0, self.battery - 1)
-
-        # 2. Movement Logic (Stay in Sectors)
-        self.x += self.vx
-        self.y += self.vy
-
-        # Define Sector Bounds
-        # Drone 1 stays in Alpha (Left), Drone 2 in Bravo (Right)
-        if self.id == 1:
-            min_x, max_x = 50, 450
-        else:
-            min_x, max_x = 550, 950
-            
-        # Bounce off boundaries
-        if self.x < min_x or self.x > max_x: self.vx *= -1
-        if self.y < 50 or self.y > HEIGHT - 50: self.vy *= -1
+    def update(self):
+        # 1. Battery Logic
+        self.battery -= 0.02
         
-        # Jitter movement to look like a real flight controller
-        self.vx += random.uniform(-0.1, 0.1)
-        self.vy += random.uniform(-0.1, 0.1)
-        self.vx = max(-2, min(2, self.vx))
-        self.vy = max(-2, min(2, self.vy))
+        # 2. Movement Logic (Patrol vs Pursuit)
+        if self.target:
+            # Move towards target
+            tx, ty = self.target
+            dx, dy = tx - self.x, ty - self.y
+            dist = (dx**2 + dy**2)**0.5
+            if dist > 5:
+                self.x += (dx/dist) * 3
+                self.y += (dy/dist) * 3
+            else:
+                self.target = None # Target reached/cleared
+        else:
+            # Standard Patrol Logic
+            self.x += random.uniform(-2, 2)
+            self.y += random.uniform(-2, 2)
+
+        # Stay in bounds
+        self.x = max(50, min(RADAR_WIDTH-50, self.x))
+        self.y = max(50, min(HEIGHT-50, self.y))
+        
+        # Record path for heatmap/coverage
+        if len(self.path) > 50: self.path.pop(0)
+        self.path.append((int(self.x), int(self.y)))
+
+def draw_sidebar(screen, drones, targets):
+    pygame.draw.rect(screen, UI_PANEL, (RADAR_WIDTH, 0, 200, HEIGHT))
+    pygame.draw.line(screen, CYAN, (RADAR_WIDTH, 0), (RADAR_WIDTH, HEIGHT), 2)
+    
+    font = pygame.font.SysFont("monospace", 16, bold=True)
+    screen.blit(font.render("BHEESHM C2", True, CYAN), (RADAR_WIDTH+40, 20))
+    
+    y_offset = 80
+    for d in drones:
+        # Battery Bars
+        screen.blit(font.render(f"DRONE {d.id}", True, WHITE), (RADAR_WIDTH+20, y_offset))
+        pygame.draw.rect(screen, (50, 50, 50), (RADAR_WIDTH+20, y_offset+25, 160, 10))
+        bar_color = GREEN if d.battery > 50 else (RED if d.battery < 20 else (255, 255, 0))
+        pygame.draw.rect(screen, bar_color, (RADAR_WIDTH+20, y_offset+25, 1.6*d.battery, 10))
+        y_offset += 70
+
+    # Threat List
+    screen.blit(font.render("THREATS DETECTED", True, RED), (RADAR_WIDTH+10, 400))
+    for i, t in enumerate(targets):
+        screen.blit(font.render(f"OBJ-{i}: {int(t[0])},{int(t[1])}", True, WHITE), (RADAR_WIDTH+20, 430 + (i*25)))
 
 def main():
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    pygame.display.set_caption("BHEESHM: Tactical Simulator (Offline Mode)")
+    pygame.display.set_caption("BHEESHM: Advanced Tactical Digital Twin")
     
-    # LOAD ASSETS
     try:
         bg = pygame.image.load("basecamp.png")
-        bg = pygame.transform.scale(bg, (WIDTH, HEIGHT))
+        bg = pygame.transform.scale(bg, (RADAR_WIDTH, HEIGHT))
     except:
         bg = None
 
+    drones = [
+        VirtualDrone(1, 200, 300, RED),
+        VirtualDrone(2, 700, 400, (255, 165, 0))
+    ]
+    
+    targets = [] # List of (x, y) enemy positions
     clock = pygame.time.Clock()
-    font = pygame.font.SysFont("arial", 18, bold=True)
-    small_font = pygame.font.SysFont("arial", 12)
-
-    # Initialize Swarm with starting positions in their respective sectors
-    swarm = {
-        1: Drone(1, 250, 375), # Center of Alpha
-        2: Drone(2, 750, 375)  # Center of Bravo
-    }
-    global MASTER_ID
-
     running = True
-    try:
-        while running:
-            current_time = time.time()
+
+    while running:
+        # 1. DRAW BASE
+        if bg: screen.blit(bg, (0, 0))
+        else: screen.fill(BG_DARK)
+
+        # 2. TARGET GENERATION (Simulate an "Enemy" appearing)
+        if random.random() < 0.005 and len(targets) < 5:
+            targets.append((random.randint(100, RADAR_WIDTH-100), random.randint(100, HEIGHT-100)))
+
+        # 3. UPDATE & DRAW DRONES
+        for d in drones:
+            d.update()
             
-            # 1. DRAW BACKGROUND & SECTORS
-            if bg: screen.blit(bg, (0, 0))
-            else: screen.fill((10, 15, 20))
+            # Check for nearest target
+            if not d.target and targets:
+                d.target = targets[0] # Simplest logic: go to the first target
+
+            # Draw Search Trail (Heatmap Effect)
+            for p in d.path:
+                pygame.draw.circle(screen, d.color, p, 2, 0)
+
+            # Draw Drone
+            pygame.draw.circle(screen, d.color, (int(d.x), int(d.y)), 12)
+            pygame.draw.circle(screen, WHITE, (int(d.x), int(d.y)), 12, 2)
             
-            pygame.draw.line(screen, CYAN, (WIDTH//2, 0), (WIDTH//2, HEIGHT), 2)
-            screen.blit(font.render("SECTOR ALPHA", True, CYAN), (50, 20))
-            screen.blit(font.render("SECTOR BRAVO", True, CYAN), (WIDTH//2 + 50, 20))
+            # Scanning Radius (The AI "Eye")
+            pygame.draw.circle(screen, d.color, (int(d.x), int(d.y)), 80, 1)
 
-            # 2. CAPTURE UDP DATA (If hardware is plugged in)
-            try:
-                while True:
-                    data, addr = sock.recvfrom(1024)
-                    msg = data.decode('utf-8').split(',')
-                    if len(msg) == 4:
-                        d_id, d_x, d_y, d_bat = int(msg[0]), float(msg[1]), float(msg[2]), int(msg[3])
-                        if d_id in swarm:
-                            drone = swarm[d_id]
-                            drone.x, drone.y, drone.battery = d_x, d_y, d_bat
-                            drone.last_seen = current_time
-                            drone.is_physical = True # Hardware override active
-            except BlockingIOError: pass
+            # Check if target is cleared (Drone within 80px range)
+            if d.target and ((d.x - d.target[0])**2 + (d.y - d.target[1])**2)**0.5 < 80:
+                if d.target in targets: targets.remove(d.target)
 
-            # 3. UPDATE DRONES (Simulate or Use Hardware)
-            for d_id, drone in swarm.items():
-                # If no hardware packet in 3 seconds, switch to Simulation
-                if current_time - drone.last_seen > HEARTBEAT_TIMEOUT:
-                    drone.is_physical = False
-                    drone.simulate_behavior(MASTER_ID)
-                
-                # Determine Visual State
-                color = RED if d_id == MASTER_ID else (ORANGE if drone.is_physical else VIRTUAL_BLUE)
-                status_text = "MASTER (ANCHOR)" if d_id == MASTER_ID else "SCOUT"
-                mode_text = "[LIVE]" if drone.is_physical else "[SIMULATED]"
+        # 4. DRAW TARGETS
+        for t in targets:
+            pygame.draw.line(screen, RED, (t[0]-10, t[1]-10), (t[0]+10, t[1]+10), 3)
+            pygame.draw.line(screen, RED, (t[0]+10, t[1]-10), (t[0]-10, t[1]+10), 3)
 
-                # 4. DRAWING
-                pos = (int(drone.x), int(drone.y))
-                pygame.draw.circle(screen, color, pos, 15)
-                pygame.draw.circle(screen, WHITE, pos, 15, 2)
-                
-                label = font.render(f"ID:{d_id} | {status_text}", True, WHITE)
-                meta = small_font.render(f"{mode_text} BATT: {drone.battery}%", True, WHITE)
-                
-                screen.blit(label, (drone.x + 20, drone.y - 20))
-                screen.blit(meta, (drone.x + 20, drone.y))
+        # 5. UI PANEL
+        draw_sidebar(screen, drones, targets)
 
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT: running = False
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT: running = False
 
-            pygame.display.flip()
-            clock.tick(FPS)
-    finally:
-        csv_file.close()
-        pygame.quit()
+        pygame.display.flip()
+        clock.tick(FPS)
+
+    pygame.quit()
 
 if __name__ == "__main__":
     main()
